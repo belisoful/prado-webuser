@@ -1,0 +1,6 @@
+webuser_name_required				= A user name is required to create an account.
+webuser_password_required			= A password is required.
+webuser_name_taken					= The user name '{0}' is already taken.
+webuser_email_taken					= The email address '{0}' already belongs to an account.
+webuser_user_not_stored				= The account '{0}' has no stored record to act on; create it first.
+webuser_table_nonexistent			= The table '{0}' does not exist and AutoCreateTables is false.
