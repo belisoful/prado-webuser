@@ -83,6 +83,42 @@ the account holds, and so does suspending or deleting it.
 way.
 
 
+Email is a placeholder
+----------------------
+
+This package sends plain text straight to PHP's `mail()`. That is enough to get an activation or
+reset link to somebody, and it is meant to be replaced:
+
+```xml
+<module id="users" class="TWebUserManager" ConnectionID="db"
+        FromAddress="no-reply@example.com" SiteName="Example"
+        ActivationUrl="https://example.com/activate?token={token}"
+        PasswordResetUrl="https://example.com/reset?token={token}" />
+```
+
+```php
+$users->sendActivationEmail($user);     // issues the token and mails the link
+$users->sendPasswordResetEmail($user);
+```
+
+A real mailer takes over by answering `dySendMail` and returning true, after which nothing here
+sends anything:
+
+```php
+class MyMailerBehavior extends TBehavior
+{
+	public function dySendMail($handled, $to, $subject, $body)
+	{
+		// hand it to Symfony Mailer, or whatever is doing the sending
+		return true;
+	}
+}
+```
+
+Templates, queueing, HTML parts, attachments, and bounce handling belong in that mailer. Do not
+grow them here.
+
+
 Development
 -----------
 

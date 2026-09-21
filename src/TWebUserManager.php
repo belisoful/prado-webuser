@@ -46,6 +46,12 @@ use Prado\TPropertyValue;
  * stored as a selector and a SHA-256 hash of the secret half, so the token table cannot be used to
  * take an account over even when it is read.
  *
+ * The mail this sends is a placeholder: plain text, straight to PHP's `mail()`, enough to get an
+ * activation or reset link to somebody. A real mailer takes it over by answering `dySendMail`,
+ * after which nothing here sends anything. Anything more -- templates, queueing, HTML parts,
+ * attachments, bounces -- belongs in that mailer rather than in this package.
+ *
+ * @method bool dySendMail(bool $handled, string $to, string $subject, string $body)
  * @author Brad Anderson <belisoful@icloud.com>
  * @since 1.0.0
  */
@@ -104,6 +110,21 @@ class TWebUserManager extends TDbUserManager
 
 	/** @var int how long a remember-me token is good for, in seconds */
 	private int $_cookieLifetime = 2592000;
+
+	/** @var string the address activation and reset mail is sent from */
+	private string $_fromAddress = '';
+
+	/** @var string the name shown beside the from address */
+	private string $_fromName = '';
+
+	/** @var string the site name used in the subject lines */
+	private string $_siteName = '';
+
+	/** @var string the activation link, with {token} where the token goes */
+	private string $_activationUrl = '';
+
+	/** @var string the password reset link, with {token} where the token goes */
+	private string $_passwordResetUrl = '';
 
 	/** @var bool whether the tables have been checked for */
 	private bool $_tablesEnsured = false;
@@ -739,6 +760,186 @@ class TWebUserManager extends TDbUserManager
 		$row = $command->query()->read();
 
 		return $row === false ? 0 : (int) $row['total'];
+	}
+
+	/**
+	 * @return string the address activation and reset mail is sent from
+	 */
+	public function getFromAddress(): string
+	{
+		return $this->_fromAddress;
+	}
+
+	/**
+	 * @param string $value the address activation and reset mail is sent from
+	 */
+	public function setFromAddress($value): void
+	{
+		$this->_fromAddress = TPropertyValue::ensureString($value);
+	}
+
+	/**
+	 * @return string the name shown beside the from address
+	 */
+	public function getFromName(): string
+	{
+		return $this->_fromName;
+	}
+
+	/**
+	 * @param string $value the name shown beside the from address
+	 */
+	public function setFromName($value): void
+	{
+		$this->_fromName = TPropertyValue::ensureString($value);
+	}
+
+	/**
+	 * @return string the site name used in the subject lines
+	 */
+	public function getSiteName(): string
+	{
+		return $this->_siteName;
+	}
+
+	/**
+	 * @param string $value the site name used in the subject lines
+	 */
+	public function setSiteName($value): void
+	{
+		$this->_siteName = TPropertyValue::ensureString($value);
+	}
+
+	/**
+	 * @return string the activation link, with {token} where the token goes
+	 */
+	public function getActivationUrl(): string
+	{
+		return $this->_activationUrl;
+	}
+
+	/**
+	 * @param string $value the activation link, with {token} where the token goes
+	 */
+	public function setActivationUrl($value): void
+	{
+		$this->_activationUrl = TPropertyValue::ensureString($value);
+	}
+
+	/**
+	 * @return string the password reset link, with {token} where the token goes
+	 */
+	public function getPasswordResetUrl(): string
+	{
+		return $this->_passwordResetUrl;
+	}
+
+	/**
+	 * @param string $value the password reset link, with {token} where the token goes
+	 */
+	public function setPasswordResetUrl($value): void
+	{
+		$this->_passwordResetUrl = TPropertyValue::ensureString($value);
+	}
+
+	/**
+	 * Issues an activation token and mails the link to the account's address.
+	 * @param \Belisoful\Prado\Security\TWebUser $user the account to confirm
+	 * @throws \Prado\Exceptions\TInvalidOperationException when the account is not stored.
+	 * @return bool whether the message was handed to a mailer
+	 */
+	public function sendActivationEmail(TWebUser $user): bool
+	{
+		if ($user->getEmail() === '' || $this->getActivationUrl() === '') {
+			return false;
+		}
+		$link = $this->buildLink($this->getActivationUrl(), $this->issueActivationToken($user));
+		$site = $this->getSiteName();
+
+		return $this->sendMail(
+			$user->getEmail(),
+			trim(($site === '' ? '' : $site . ': ') . 'confirm your email address'),
+			"Hello " . $user->getDisplayName() . ",\n\n"
+			. "Open this link to confirm your email address:\n\n" . $link . "\n\n"
+			. "If you did not register, you can ignore this message.\n"
+		);
+	}
+
+	/**
+	 * Issues a reset token and mails the link to the account's address.
+	 * @param \Belisoful\Prado\Security\TWebUser $user the account to reset
+	 * @throws \Prado\Exceptions\TInvalidOperationException when the account is not stored.
+	 * @return bool whether the message was handed to a mailer
+	 */
+	public function sendPasswordResetEmail(TWebUser $user): bool
+	{
+		if ($user->getEmail() === '' || $this->getPasswordResetUrl() === '') {
+			return false;
+		}
+		$link = $this->buildLink($this->getPasswordResetUrl(), $this->issuePasswordResetToken($user));
+		$site = $this->getSiteName();
+
+		return $this->sendMail(
+			$user->getEmail(),
+			trim(($site === '' ? '' : $site . ': ') . 'reset your password'),
+			"Hello " . $user->getDisplayName() . ",\n\n"
+			. "Open this link to set a new password:\n\n" . $link . "\n\n"
+			. "If you did not ask for this, you can ignore this message; your password stays as it is.\n"
+		);
+	}
+
+	/**
+	 * Sends a message.
+	 *
+	 * This is deliberately the smallest thing that works, and it is where a real mailer takes
+	 * over: a behavior that answers `dySendMail` and returns true handles the message instead,
+	 * and nothing else in this package changes. Templates, queueing, HTML parts, attachments, and
+	 * bounce handling belong in that mailer, not here.
+	 *
+	 * @param string $to the address to send to
+	 * @param string $subject the subject line
+	 * @param string $body the message, as plain text
+	 * @return bool whether the message was handed to a mailer
+	 */
+	public function sendMail(string $to, string $subject, string $body): bool
+	{
+		if ($to === '') {
+			return false;
+		}
+		if ($this->dySendMail(false, $to, $subject, $body) === true) {
+			return true;
+		}
+
+		return $this->deliverMail($to, $subject, $body);
+	}
+
+	/**
+	 * Hands a message to PHP's mail(). Overridden in tests, and bypassed entirely once a mailer
+	 * answers {@see sendMail}'s `dySendMail`.
+	 * @param string $to the address to send to
+	 * @param string $subject the subject line
+	 * @param string $body the message, as plain text
+	 * @return bool whether mail() accepted the message
+	 */
+	protected function deliverMail(string $to, string $subject, string $body): bool
+	{
+		$headers = ['Content-Type: text/plain; charset=UTF-8'];
+		if ($this->getFromAddress() !== '') {
+			$name = $this->getFromName();
+			$headers[] = 'From: ' . ($name === '' ? $this->getFromAddress() : $name . ' <' . $this->getFromAddress() . '>');
+		}
+
+		return mail($to, $subject, $body, implode("\r\n", $headers));
+	}
+
+	/**
+	 * @param string $url the link, with {token} where the token goes
+	 * @param string $token the token to put in it
+	 * @return string the link to send
+	 */
+	protected function buildLink(string $url, string $token): string
+	{
+		return str_replace('{token}', rawurlencode($token), $url);
 	}
 
 	/**

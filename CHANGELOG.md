@@ -29,3 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `onPasswordChanged` -- so mail and audit trails hang off the manager rather than off a page.
 - Roles stored on the account row and restored onto the user.
 - `purgeExpiredTokens()` for a cron task, and `countUsersByStatus()` for a moderation queue.
+- A placeholder mailer: `sendActivationEmail()` and `sendPasswordResetEmail()` issue the token,
+  put it in a configured link, and send plain text through PHP's `mail()`. A real mailer takes
+  over by answering `dySendMail` and returning true, after which this package sends nothing.
+  Templates, queueing, HTML parts, attachments, and bounces belong in that mailer.
