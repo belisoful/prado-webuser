@@ -105,9 +105,6 @@ class TWebUserManager extends TDbUserManager
 	/** @var int how long a remember-me token is good for, in seconds */
 	private int $_cookieLifetime = 2592000;
 
-	/** @var string the class rows are loaded into */
-	private string $_userClassName = '';
-
 	/** @var bool whether the tables have been checked for */
 	private bool $_tablesEnsured = false;
 
@@ -120,9 +117,6 @@ class TWebUserManager extends TDbUserManager
 		if ($this->getUserClass() === '') {
 			$this->setUserClass(TWebUser::class);
 		}
-		// TDbUserManager::getUserClass() refuses to answer once the module is initialized, so the
-		// class name is kept here while it can still be read.
-		$this->_userClassName = $this->getUserClass();
 		parent::init($config);
 	}
 
@@ -898,7 +892,7 @@ class TWebUserManager extends TDbUserManager
 	 */
 	protected function populateUser(array $row): TWebUser
 	{
-		$user = Prado::createComponent($this->_userClassName, $this);
+		$user = Prado::createComponent($this->getUserClass(), $this);
 		assert($user instanceof TWebUser);
 		$user->setIsGuest(false);
 		$user->setID((int) $row['id']);
