@@ -525,4 +525,49 @@ class TWebUserManagerTest extends PHPUnit\Framework\TestCase
 			$this->assertInstanceOf($exception, $thrown);
 		}
 	}
+
+	public function testAProfileCanBeChanged()
+	{
+		$manager = WebUserTestTools::createManager();
+		$user = $manager->createUser('rayelan', 'correct horse', 'rayelan@example.com');
+		$manager->createUser('hobie', 'another password', 'hobie@example.com');
+		$updated = 0;
+		$manager->attachEventHandler('onUserUpdated', function () use (&$updated) {
+			$updated++;
+		});
+
+		$manager->updateProfile($user, ['DisplayName' => ' Rayelan ', 'Url' => 'https://example.com', 'Email' => 'new@example.com']);
+		$manager->updateProfile($user, []);
+
+		$stored = $manager->findUserById($user->getID());
+		$this->assertSame('Rayelan', $stored->getDisplayName());
+		$this->assertSame('https://example.com', $stored->getUrl());
+		$this->assertSame('new@example.com', $stored->getEmail());
+		$this->assertSame('Rayelan', $user->getDisplayName());
+		$this->assertSame(1, $updated);
+
+		$this->expectException(TInvalidDataValueException::class);
+		$manager->updateProfile($user, ['Email' => 'hobie@example.com']);
+	}
+
+	public function testAccountsCanBeSearched()
+	{
+		$manager = WebUserTestTools::createManager(['RequireEmailVerification' => false, 'RequireApproval' => true]);
+		$first = $manager->createUser('rayelan', 'pw', 'rayelan@example.com', ['DisplayName' => 'Raye']);
+		$second = $manager->createUser('hobie', 'pw', 'hobie@example.org');
+		$third = $manager->createUser('100%real', 'pw', 'real@example.org');
+		$manager->approveUser($first);
+
+		$this->assertSame(3, $manager->countUsers());
+		$this->assertSame(['100%real', 'hobie', 'rayelan'], array_map(fn ($user) => $user->getName(), $manager->searchUsers()));
+		$this->assertSame(['rayelan'], array_map(fn ($user) => $user->getName(), $manager->searchUsers('RAYE')));
+		$this->assertSame(['100%real', 'hobie'], array_map(fn ($user) => $user->getName(), $manager->searchUsers('example.org')));
+		$this->assertSame(['100%real'], array_map(fn ($user) => $user->getName(), $manager->searchUsers('100%')));
+		$this->assertSame(2, $manager->countUsers('', [TWebUserManager::STATUS_PENDING_APPROVAL]));
+		$this->assertSame(['hobie'], array_map(fn ($user) => $user->getName(), $manager->searchUsers('hob', [TWebUserManager::STATUS_PENDING_APPROVAL])));
+		$this->assertSame([], $manager->searchUsers('', []));
+		$this->assertSame(['hobie'], array_map(fn ($user) => $user->getName(), $manager->searchUsers('', null, 1, 1)));
+		$this->assertSame($third->getID(), $manager->searchUsers('', null, 1)[0]->getID());
+		$this->assertSame($second->getID(), $manager->searchUsers('hobie@')[0]->getID());
+	}
 }

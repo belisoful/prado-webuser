@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `updateProfile()` changes an account's email, display name, and web address, refusing an email
+  another account holds, and raises `onUserUpdated`.
+- `searchUsers()` and `countUsers()` find accounts by any part of the name, display name, or
+  email, optionally only in some statuses -- pending approval, say -- newest first.
+
 - `TWebUserManager`, a database user manager built on the framework's `TDbUserManager`: it
   creates accounts, checks credentials, and carries an account through email verification,
   approval, suspension, deletion, and purging. Tables are created on first use on MySQL,

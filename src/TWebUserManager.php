@@ -747,6 +747,89 @@ class TWebUserManager extends TDbUserManager
 	}
 
 	/**
+	 * Changes what an account says about itself.
+	 * @param \Belisoful\Prado\Security\TWebUser $user the account to change
+	 * @param array $properties any of Email, DisplayName, Url
+	 * @throws \Prado\Exceptions\TInvalidOperationException when the account is not stored.
+	 * @throws \Prado\Exceptions\TInvalidDataValueException when the email belongs to another account.
+	 */
+	public function updateProfile(TWebUser $user, array $properties): void
+	{
+		$this->assertStored($user);
+		$columns = [];
+		if (array_key_exists('Email', $properties)) {
+			$email = trim((string) $properties['Email']);
+			$owner = $email === '' ? null : $this->findUserByEmail($email);
+			if ($owner !== null && $owner->getID() !== $user->getID() && !$this->getAllowDuplicateEmail()) {
+				throw new TInvalidDataValueException('webuser_email_taken', $email);
+			}
+			$columns['user_email'] = $email;
+		}
+		if (array_key_exists('DisplayName', $properties)) {
+			$columns['display_name'] = trim((string) $properties['DisplayName']);
+		}
+		if (array_key_exists('Url', $properties)) {
+			$columns['user_url'] = trim((string) $properties['Url']);
+		}
+		if ($columns === []) {
+			return;
+		}
+		$assignments = implode(', ', array_map(fn ($column) => $column . ' = :' . $column, array_keys($columns)));
+		$command = $this->getDbConnection()->createCommand(
+			'UPDATE ' . $this->getTableName() . ' SET ' . $assignments . ' WHERE id = :id'
+		);
+		foreach ($columns as $column => $value) {
+			$command->bindValue(':' . $column, $value, PDO::PARAM_STR);
+		}
+		$command->bindValue(':id', $user->getID(), PDO::PARAM_INT);
+		$command->execute();
+
+		isset($columns['user_email']) && $user->setEmail($columns['user_email']);
+		isset($columns['display_name']) && $user->setDisplayName($columns['display_name']);
+		isset($columns['user_url']) && $user->setUrl($columns['user_url']);
+		$this->onUserUpdated($user);
+	}
+
+	/**
+	 * Finds accounts for an administrator: by any part of the name, the name shown, or the email
+	 * address, newest first.
+	 * @param string $query what to look for; '' for every account
+	 * @param null|int[] $statuses only these statuses, or null for all of them
+	 * @param int $limit how many to read
+	 * @param int $offset how many to skip
+	 * @return \Belisoful\Prado\Security\TWebUser[] the accounts
+	 */
+	public function searchUsers(string $query = '', ?array $statuses = null, int $limit = 50, int $offset = 0): array
+	{
+		[$where, $parameters] = $this->searchCondition($query, $statuses);
+		$command = $this->getDbConnection()->createCommand(
+			'SELECT * FROM ' . $this->getTableName() . $where
+			. ' ORDER BY registered_time DESC, id DESC LIMIT ' . max(0, $limit) . ' OFFSET ' . max(0, $offset)
+		);
+		foreach ($parameters as $name => $value) {
+			$command->bindValue($name, $value, is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR);
+		}
+
+		return array_map(fn (array $row) => $this->populateUser($row), $command->query()->readAll());
+	}
+
+	/**
+	 * @param string $query what to look for; '' for every account
+	 * @param null|int[] $statuses only these statuses, or null for all of them
+	 * @return int how many accounts {@see searchUsers} would find
+	 */
+	public function countUsers(string $query = '', ?array $statuses = null): int
+	{
+		[$where, $parameters] = $this->searchCondition($query, $statuses);
+		$command = $this->getDbConnection()->createCommand('SELECT COUNT(*) FROM ' . $this->getTableName() . $where);
+		foreach ($parameters as $name => $value) {
+			$command->bindValue($name, $value, is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR);
+		}
+
+		return (int) $command->queryScalar();
+	}
+
+	/**
 	 * @param int $status the status to count
 	 * @return int how many accounts hold that status
 	 */
@@ -997,6 +1080,15 @@ class TWebUserManager extends TDbUserManager
 	}
 
 	/**
+	 * Raised after an account's profile changes.
+	 * @param \Belisoful\Prado\Security\TWebUser $user the account
+	 */
+	public function onUserUpdated(TWebUser $user): void
+	{
+		$this->raiseEvent('onUserUpdated', $this, $user);
+	}
+
+	/**
 	 * Raised after an account is deleted.
 	 * @param \Belisoful\Prado\Security\TWebUser $user the account
 	 */
@@ -1121,6 +1213,39 @@ class TWebUserManager extends TDbUserManager
 	protected function rolesToString(array $roles): string
 	{
 		return implode(',', array_filter(array_map(fn ($role) => trim((string) $role), $roles), fn ($role) => $role !== ''));
+	}
+
+	/**
+	 * @param string $query what to look for
+	 * @param null|int[] $statuses only these statuses, or null for all
+	 * @return array{0: string, 1: array} the WHERE clause, '' for none, and its parameters
+	 */
+	protected function searchCondition(string $query, ?array $statuses): array
+	{
+		$this->ensureTables();
+		$conditions = [];
+		$parameters = [];
+		$query = trim($query);
+		if ($query !== '') {
+			$like = '%' . str_replace(['!', '%', '_'], ['!!', '!%', '!_'], strtolower($query)) . '%';
+			$conditions[] = "(LOWER(user_name) LIKE :q1 ESCAPE '!' OR LOWER(display_name) LIKE :q2 ESCAPE '!' OR LOWER(user_email) LIKE :q3 ESCAPE '!')";
+			$parameters += [':q1' => $like, ':q2' => $like, ':q3' => $like];
+		}
+		if ($statuses !== null) {
+			$statuses = array_values(array_map('intval', $statuses));
+			if ($statuses === []) {
+				$conditions[] = '1 = 0';
+			} else {
+				$names = [];
+				foreach ($statuses as $i => $status) {
+					$names[] = ':s' . $i;
+					$parameters[':s' . $i] = $status;
+				}
+				$conditions[] = 'status IN (' . implode(', ', $names) . ')';
+			}
+		}
+
+		return [$conditions === [] ? '' : ' WHERE ' . implode(' AND ', $conditions), $parameters];
 	}
 
 	/**
