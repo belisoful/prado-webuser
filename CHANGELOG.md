@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Activation codes: `issueActivationCode()` makes a six-digit code a person can type or follow
+  in a link, `activateWithCode()` confirms the address with it, and `sendActivationCodeEmail()`
+  mails it, filling `{code}` and `{user}` in the activation URL. A code is tied to its account,
+  replaces any earlier one, works for thirty minutes, and dies after five wrong guesses.
+
 - `updateProfile()` changes an account's email, display name, and web address, refusing an email
   another account holds, and raises `onUserUpdated`.
 - `searchUsers()` and `countUsers()` find accounts by any part of the name, display name, or

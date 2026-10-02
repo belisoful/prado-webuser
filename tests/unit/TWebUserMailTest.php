@@ -146,4 +146,28 @@ class TWebUserMailTest extends PHPUnit\Framework\TestCase
 		$this->assertFalse($manager->sendMail('', 'subject', 'body'));
 		$this->assertSame([], $manager->sent);
 	}
+
+	public function testAnActivationCodeIsMailedWithALinkThatCarriesIt()
+	{
+		$manager = $this->manager(['ActivationUrl' => 'https://example.com/activate?u={user}&code={code}']);
+		$user = $manager->createUser('rayelan', 'correct horse', 'rayelan@example.com');
+
+		$this->assertTrue($manager->sendActivationCodeEmail($user));
+		$message = $manager->sent[0];
+		$this->assertMatchesRegularExpression('/^Example: your code is \d{6}$/', $message['subject']);
+		preg_match('/\b(\d{6})\b/', $message['body'], $match);
+		$this->assertStringContainsString('https://example.com/activate?u=' . $user->getID() . '&code=' . $match[1], $message['body']);
+		$this->assertStringContainsString('works for 30 minutes', $message['body']);
+		$this->assertTrue($manager->activateWithCode($user, $match[1]));
+		$this->assertSame(TWebUserManager::STATUS_ACTIVE, $manager->findUserById($user->getID())->getStatus());
+	}
+
+	public function testAnAccountWithNoEmailGetsNoCode()
+	{
+		$manager = $this->manager();
+		$user = $manager->createUser('rayelan', 'correct horse');
+
+		$this->assertFalse($manager->sendActivationCodeEmail($user));
+		$this->assertSame([], $manager->sent);
+	}
 }

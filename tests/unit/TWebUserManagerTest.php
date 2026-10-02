@@ -570,4 +570,74 @@ class TWebUserManagerTest extends PHPUnit\Framework\TestCase
 		$this->assertSame($third->getID(), $manager->searchUsers('', null, 1)[0]->getID());
 		$this->assertSame($second->getID(), $manager->searchUsers('hobie@')[0]->getID());
 	}
+
+	public function testAnActivationCodeConfirmsTheEmailAddress()
+	{
+		$manager = WebUserTestTools::createManager(['RequireEmailVerification' => true]);
+		$user = $manager->createUser('rayelan', 'correct horse', 'rayelan@example.com');
+		$activated = 0;
+		$manager->attachEventHandler('onUserActivated', function () use (&$activated) {
+			$activated++;
+		});
+		$code = $manager->issueActivationCode($user);
+
+		$this->assertMatchesRegularExpression('/^\d{6}$/', $code);
+		$this->assertFalse($manager->activateWithCode($user, $code === '000000' ? '000001' : '000000'));
+		$this->assertTrue($manager->activateWithCode($user, substr($code, 0, 3) . ' - ' . substr($code, 3)), 'spaces and dashes are ignored');
+		$this->assertSame(TWebUserManager::STATUS_ACTIVE, $manager->findUserById($user->getID())->getStatus());
+		$this->assertSame(1, $activated);
+		$this->assertFalse($manager->activateWithCode($user, $code), 'a code works once, and only while the address is unconfirmed');
+	}
+
+	public function testACodeLeadsToApprovalWhenApprovalIsRequired()
+	{
+		$manager = WebUserTestTools::createManager(['RequireEmailVerification' => true, 'RequireApproval' => true]);
+		$user = $manager->createUser('rayelan', 'correct horse', 'rayelan@example.com');
+
+		$this->assertTrue($manager->activateWithCode($user, $manager->issueActivationCode($user)));
+		$this->assertSame(TWebUserManager::STATUS_PENDING_APPROVAL, $user->getStatus());
+	}
+
+	public function testACodeDiesAfterTooManyWrongGuesses()
+	{
+		$manager = WebUserTestTools::createManager(['RequireEmailVerification' => true]);
+		$user = $manager->createUser('rayelan', 'correct horse', 'rayelan@example.com');
+		$code = $manager->issueActivationCode($user);
+		$wrong = $code === '000000' ? '111111' : '000000';
+
+		for ($i = 0; $i < TWebUserManager::CODE_ATTEMPTS; $i++) {
+			$this->assertFalse($manager->activateWithCode($user, $wrong));
+		}
+		$this->assertFalse($manager->activateWithCode($user, $code), 'the right code no longer works');
+
+		$fresh = $manager->issueActivationCode($user);
+		$this->assertTrue($manager->activateWithCode($user, $fresh), 'a new code starts the count again');
+	}
+
+	public function testANewCodeReplacesTheOldOneAndCodesAreTiedToTheirAccount()
+	{
+		$manager = WebUserTestTools::createManager(['RequireEmailVerification' => true]);
+		$first = $manager->createUser('rayelan', 'correct horse', 'rayelan@example.com');
+		$second = $manager->createUser('hobie', 'another', 'hobie@example.com');
+		$old = $manager->issueActivationCode($first);
+		$new = $manager->issueActivationCode($first);
+		$other = $manager->issueActivationCode($second);
+
+		if ($old !== $new) {
+			$this->assertFalse($manager->activateWithCode($first, $old));
+		}
+		if ($other !== $new) {
+			$this->assertFalse($manager->activateWithCode($first, $other), "another account's code is no use");
+		}
+		$this->assertTrue($manager->activateWithCode($first, $new));
+	}
+
+	public function testAnExpiredCodeDoesNotWork()
+	{
+		$manager = WebUserTestTools::createManager(['RequireEmailVerification' => true]);
+		$user = $manager->createUser('rayelan', 'correct horse', 'rayelan@example.com');
+		$code = $manager->issueActivationCode($user, -1);
+
+		$this->assertFalse($manager->activateWithCode($user, $code));
+	}
 }

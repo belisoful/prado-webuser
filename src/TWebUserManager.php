@@ -81,6 +81,21 @@ class TWebUserManager extends TDbUserManager
 	/** A token that signs a returning browser in. */
 	public const TOKEN_COOKIE = 'cookie';
 
+	/** A short code, typed or followed from an email, that confirms an address. */
+	public const TOKEN_ACTIVATION_CODE = 'activation_code';
+
+	/** A wrong guess at an activation code, counted against further guesses. */
+	public const TOKEN_CODE_FAILURE = 'code_failure';
+
+	/** How many digits an activation code has. */
+	public const CODE_DIGITS = 6;
+
+	/** How many wrong guesses an activation code survives. */
+	public const CODE_ATTEMPTS = 5;
+
+	/** How long an activation code works, in seconds: short, since six digits can be guessed. */
+	public const CODE_LIFETIME = 1800;
+
 	/**
 	 * Checked when no account matches, so that answering "no such user" takes as long as
 	 * answering "wrong password" and cannot be told from it by timing.
@@ -949,6 +964,98 @@ class TWebUserManager extends TDbUserManager
 	}
 
 	/**
+	 * Issues a short activation code for an account waiting on its email address: one a person
+	 * can read out of an email and type, as well as follow in a link. Any code issued before for
+	 * the account stops working, and so do the wrong guesses counted against it.
+	 *
+	 * A six-digit code is guessable where a long token is not, so it lives for
+	 * {@see CODE_LIFETIME} seconds and dies after {@see CODE_ATTEMPTS} wrong guesses
+	 * ({@see activateWithCode}); a site should also limit how often codes are asked for.
+	 * @param \Belisoful\Prado\Security\TWebUser $user the account
+	 * @param null|int $lifetime seconds the code works, {@see CODE_LIFETIME} when null
+	 * @throws \Prado\Exceptions\TInvalidOperationException when the account is not stored.
+	 * @return string the code, digits only
+	 */
+	public function issueActivationCode(TWebUser $user, ?int $lifetime = null): string
+	{
+		$this->assertStored($user);
+		$this->revokeTokens($user->getID(), self::TOKEN_ACTIVATION_CODE);
+		$this->revokeTokens($user->getID(), self::TOKEN_CODE_FAILURE);
+		$code = str_pad((string) random_int(0, 10 ** self::CODE_DIGITS - 1), self::CODE_DIGITS, '0', STR_PAD_LEFT);
+		$this->insertTokenRow($user->getID(), self::TOKEN_ACTIVATION_CODE, $this->hashCode($user->getID(), $code), $lifetime ?? self::CODE_LIFETIME);
+
+		return $code;
+	}
+
+	/**
+	 * Confirms an account's email address with a code from {@see issueActivationCode}, and moves
+	 * it on as {@see activateWithToken} does: to waiting for approval when that is required, and
+	 * to active otherwise.
+	 * @param \Belisoful\Prado\Security\TWebUser $user the account
+	 * @param string $code what was typed or followed; spaces and dashes are ignored
+	 * @return bool whether the code was right and the account was moved on
+	 */
+	public function activateWithCode(TWebUser $user, string $code): bool
+	{
+		if ($user->getID() <= 0 || $user->getStatus() !== self::STATUS_PENDING_EMAIL) {
+			return false;
+		}
+		$this->ensureTables();
+		$userId = $user->getID();
+		$code = (string) preg_replace('/[\s-]+/', '', $code);
+		$rows = $this->readTokenRows($userId, self::TOKEN_ACTIVATION_CODE);
+		$expected = $rows === [] ? '' : (string) $rows[0]['token_hash'];
+		$guessed = $this->hashCode($userId, $code);
+		// Compared even when there is no code, so a missing code takes as long as a wrong one.
+		$right = $expected !== '' && hash_equals($expected, $guessed) && ctype_digit($code);
+		if (!$right) {
+			if ($expected !== '') {
+				$this->insertTokenRow($userId, self::TOKEN_CODE_FAILURE, '', $this->getTokenLifetime());
+				if (count($this->readTokenRows($userId, self::TOKEN_CODE_FAILURE)) >= self::CODE_ATTEMPTS) {
+					$this->revokeTokens($userId, self::TOKEN_ACTIVATION_CODE);
+				}
+			}
+
+			return false;
+		}
+		$this->revokeTokens($userId, self::TOKEN_ACTIVATION_CODE);
+		$this->revokeTokens($userId, self::TOKEN_CODE_FAILURE);
+		$this->writeStatus($user, $this->getRequireApproval() ? self::STATUS_PENDING_APPROVAL : self::STATUS_ACTIVE);
+		$this->onUserActivated($user);
+
+		return true;
+	}
+
+	/**
+	 * Issues an activation code and mails it to the account's address, with a link that carries
+	 * it. {@see getActivationUrl} may hold `{code}` and `{user}`, filled with the code and the
+	 * account's id; without `{code}` the link is the page to type it into.
+	 * @param \Belisoful\Prado\Security\TWebUser $user the account
+	 * @throws \Prado\Exceptions\TInvalidOperationException when the account is not stored.
+	 * @return bool whether the message was handed to a mailer
+	 */
+	public function sendActivationCodeEmail(TWebUser $user): bool
+	{
+		if ($user->getEmail() === '') {
+			return false;
+		}
+		$code = $this->issueActivationCode($user);
+		$link = str_replace(['{code}', '{user}'], [rawurlencode($code), (string) $user->getID()], $this->getActivationUrl());
+		$site = $this->getSiteName();
+		$name = $user->getDisplayName() !== '' ? $user->getDisplayName() : $user->getName();
+
+		return $this->sendMail(
+			$user->getEmail(),
+			trim(($site === '' ? '' : $site . ': ') . 'your code is ' . $code),
+			"Hello " . $name . ",\n\n"
+			. "Your code to confirm your email address is:\n\n    " . $code . "\n\n"
+			. ($link !== '' ? "Open this link to confirm it, or to type the code in:\n\n" . $link . "\n\n" : '')
+			. "The code works for " . intdiv(self::CODE_LIFETIME, 60) . " minutes.\n"
+			. "If you did not register, you can ignore this message.\n"
+		);
+	}
+
+	/**
 	 * Issues a reset token and mails the link to the account's address.
 	 * @param \Belisoful\Prado\Security\TWebUser $user the account to reset
 	 * @throws \Prado\Exceptions\TInvalidOperationException when the account is not stored.
@@ -1013,6 +1120,59 @@ class TWebUserManager extends TDbUserManager
 		}
 
 		return mail($to, $subject, $body, implode("\r\n", $headers));
+	}
+
+	/**
+	 * @param int $userId the account
+	 * @param string $code an activation code
+	 * @return string the hash it is kept as: tied to the account, so a code is no use to another
+	 */
+	protected function hashCode(int $userId, string $code): string
+	{
+		return hash('sha256', $userId . ':' . $code);
+	}
+
+	/**
+	 * @param int $userId the account
+	 * @param string $purpose what the rows are for
+	 * @return array the account's rows for that purpose that have not expired, newest first
+	 */
+	protected function readTokenRows(int $userId, string $purpose): array
+	{
+		$command = $this->getDbConnection()->createCommand(
+			'SELECT * FROM ' . $this->getTokenTableName()
+			. ' WHERE user_id = :user AND purpose = :purpose AND expires_time > :now ORDER BY token_id DESC'
+		);
+		$command->bindValue(':user', $userId, PDO::PARAM_INT);
+		$command->bindValue(':purpose', $purpose, PDO::PARAM_STR);
+		$command->bindValue(':now', time(), PDO::PARAM_INT);
+
+		return $command->query()->readAll();
+	}
+
+	/**
+	 * @param int $userId the account
+	 * @param string $purpose what the row is for
+	 * @param string $hash what it keeps
+	 * @param int $lifetime seconds it lasts
+	 */
+	protected function insertTokenRow(int $userId, string $purpose, string $hash, int $lifetime): void
+	{
+		$this->ensureTables();
+		$now = time();
+		$command = $this->getDbConnection()->createCommand(
+			'INSERT INTO ' . $this->getTokenTableName()
+			. ' (user_id, purpose, selector, token_hash, expires_time, created_time)'
+			. ' VALUES (:user, :purpose, :selector, :hash, :expires, :created)'
+		);
+		$command->bindValue(':user', $userId, PDO::PARAM_INT);
+		$command->bindValue(':purpose', $purpose, PDO::PARAM_STR);
+		// A row of its own; the selector only has to be unique.
+		$command->bindValue(':selector', bin2hex(random_bytes(8)), PDO::PARAM_STR);
+		$command->bindValue(':hash', $hash, PDO::PARAM_STR);
+		$command->bindValue(':expires', $now + $lifetime, PDO::PARAM_INT);
+		$command->bindValue(':created', $now, PDO::PARAM_INT);
+		$command->execute();
 	}
 
 	/**
