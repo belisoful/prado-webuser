@@ -13,11 +13,14 @@ namespace Belisoful\Prado\Security;
 use PDO;
 use Prado\Data\TDbDriver;
 use Prado\Exceptions\TConfigurationException;
+use Prado\Exceptions\TDbException;
 use Prado\Exceptions\TInvalidDataValueException;
 use Prado\Exceptions\TInvalidOperationException;
 use Prado\Prado;
+use Prado\Security\TAuthManager;
 use Prado\Security\TDbUserManager;
 use Prado\TPropertyValue;
+use Prado\Web\THttpCookie;
 
 /**
  * TWebUserManager class.
@@ -40,6 +43,11 @@ use Prado\TPropertyValue;
  * | `STATUS_ACTIVE` | may sign in |
  * | `STATUS_DISABLED` | suspended, refused, or banned; the name stays taken |
  * | `STATUS_DELETED` | removed, and the name stays taken so the history still reads |
+ *
+ * A signed-in user is checked against its row on every request ({@see getRevalidateSessions}), so
+ * suspending or deleting an account, or changing its password, signs it out everywhere at once.
+ * The manager also listens to the {@see \Prado\Security\TAuthManager} that uses it: a sign-in is
+ * recorded with {@see recordLogin}, and signing out revokes the browser's remember-me token.
  *
  * Passwords are stored with {@see password_hash}, and a hash made by an older algorithm or cost
  * is replaced on the next correct sign-in. Activation, password reset, and remember-me tokens are
@@ -96,11 +104,8 @@ class TWebUserManager extends TDbUserManager
 	/** How long an activation code works, in seconds: short, since six digits can be guessed. */
 	public const CODE_LIFETIME = 1800;
 
-	/**
-	 * Checked when no account matches, so that answering "no such user" takes as long as
-	 * answering "wrong password" and cannot be told from it by timing.
-	 */
-	private const TIMING_HASH = '$2y$10$usesomesillystringfore.PZbsGz2AqTMgYbBOiSXZBMcSeVzKi';
+	/** How stale access_time may grow before a request writes it again, in seconds. */
+	public const ACCESS_TIME_RESOLUTION = 300;
 
 	/** @var string the table holding the accounts */
 	private string $_tableName = 'users';
@@ -141,8 +146,14 @@ class TWebUserManager extends TDbUserManager
 	/** @var string the password reset link, with {token} where the token goes */
 	private string $_passwordResetUrl = '';
 
+	/** @var bool whether a signed-in user is checked against its row on every request */
+	private bool $_revalidateSessions = true;
+
 	/** @var bool whether the tables have been checked for */
 	private bool $_tablesEnsured = false;
+
+	/** @var \Prado\Security\TAuthManager[] the auth managers this manager listens to */
+	private array $_boundAuthManagers = [];
 
 	/**
 	 * Initializes the module, defaulting the user class to {@see \Belisoful\Prado\Security\TWebUser}.
@@ -154,6 +165,128 @@ class TWebUserManager extends TDbUserManager
 			$this->setUserClass(TWebUser::class);
 		}
 		parent::init($config);
+		// The auth managers that use this manager are configured, and loaded, by the end of
+		// application initialization.
+		Prado::getApplication()?->attachEventHandler('OnInitComplete', [$this, 'bindAuthManagers']);
+	}
+
+	/**
+	 * Listens to every {@see \Prado\Security\TAuthManager} that uses this manager: its OnLogin
+	 * records the sign-in, and its OnLogout revokes the remember-me token of the browser that signs
+	 * out. Called when the application finishes initializing; safe to call again.
+	 * @since 1.0.0
+	 */
+	public function bindAuthManagers(): void
+	{
+		foreach ($this->getAuthManagers() as $auth) {
+			if (!in_array($auth, $this->_boundAuthManagers, true)) {
+				$auth->attachEventHandler('OnLogin', [$this, 'handleLogin']);
+				$auth->attachEventHandler('OnLogout', [$this, 'handleLogout']);
+				$this->_boundAuthManagers[] = $auth;
+			}
+		}
+	}
+
+	/**
+	 * Records a sign-in through an auth manager.
+	 * @param \Prado\Security\TAuthManager $sender the auth manager that signed the user in
+	 * @param mixed $user the user that signed in
+	 * @since 1.0.0
+	 */
+	public function handleLogin($sender, $user): void
+	{
+		if ($user instanceof TWebUser && $user->getID() > 0) {
+			$this->recordLogin($user, (string) $sender->getRequest()->getUserHostAddress());
+		}
+	}
+
+	/**
+	 * Revokes the remember-me token of the browser that signs out, so a copy of its cookie stops
+	 * working with it. The auth manager only clears the cookie in the browser.
+	 * @param \Prado\Security\TAuthManager $sender the auth manager signing the user out
+	 * @param mixed $user the user signing out
+	 * @since 1.0.0
+	 */
+	public function handleLogout($sender, $user): void
+	{
+		$cookie = $sender->getRequest()->getCookies()->itemAt($sender->getUserKey());
+		if (!($cookie instanceof THttpCookie) || $cookie->getValue() === '') {
+			return;
+		}
+		// The auth manager signs its cookie; an unsigned or tampered one names no token of ours.
+		$value = $sender->getApplication()->getSecurityManager()->validateCookieData($cookie->getValue());
+		if (is_string($value) && $value !== '') {
+			$this->revokeCookieToken($value);
+		}
+	}
+
+	/**
+	 * @return \Prado\Security\TAuthManager[] the loaded auth managers that use this manager
+	 */
+	protected function getAuthManagers(): array
+	{
+		$application = Prado::getApplication();
+		if ($application === null) {
+			return [];
+		}
+		$managers = [];
+		foreach ($application->getModulesByType(TAuthManager::class) as $auth) {
+			if ($auth instanceof TAuthManager && $auth->getUserManager() === $this) {
+				$managers[] = $auth;
+			}
+		}
+
+		return $managers;
+	}
+
+	/**
+	 * @return bool whether a signed-in user is checked against its row on every request, true by
+	 *   default. The check costs one primary key query, and is what ends the sessions of an account
+	 *   that is suspended, deleted, or given a new password.
+	 * @since 1.0.0
+	 */
+	public function getRevalidateSessions(): bool
+	{
+		return $this->_revalidateSessions;
+	}
+
+	/**
+	 * @param bool $value whether a signed-in user is checked against its row on every request
+	 * @since 1.0.0
+	 */
+	public function setRevalidateSessions($value): void
+	{
+		$this->_revalidateSessions = TPropertyValue::ensureBoolean($value);
+	}
+
+	/**
+	 * Brings a user restored from the session up to date with its row. A user whose account is
+	 * gone, may no longer sign in, or whose password has changed since the session began becomes
+	 * a guest. Called by {@see \Belisoful\Prado\Security\TWebUser::loadFromString}.
+	 * @param \Belisoful\Prado\Security\TWebUser $user the user from the session
+	 * @return bool whether the user is still signed in
+	 * @since 1.0.0
+	 */
+	public function revalidateUser(TWebUser $user): bool
+	{
+		if ($user->getIsGuest() || !$this->getRevalidateSessions()) {
+			return !$user->getIsGuest();
+		}
+		$row = $user->getID() > 0 ? $this->findRow('id', $user->getID()) : null;
+		if ($row === null || !hash_equals($this->passwordStamp((string) $row['user_pass']), $user->getPasswordStamp())) {
+			$user->signOut();
+
+			return false;
+		}
+		$this->fillUser($user, $row);
+		if (!$user->getCanLogin()) {
+			$user->signOut();
+
+			return false;
+		}
+		$this->touchAccessTime($user);
+
+		return true;
 	}
 
 	/**
@@ -299,7 +432,7 @@ class TWebUserManager extends TDbUserManager
 	 * @param string $password the password, which is hashed here and never stored as given
 	 * @param string $email the email address
 	 * @param array $properties display name, url, roles, registered ip, or an explicit status
-	 * @throws \Prado\Exceptions\TInvalidDataValueException when the name or password is empty, or the name or email is taken.
+	 * @throws \Prado\Exceptions\TInvalidDataValueException when the name or password is empty, the email is not an address, or the name or email is taken.
 	 * @return \Belisoful\Prado\Security\TWebUser the stored account
 	 */
 	public function createUser(string $username, #[\SensitiveParameter] string $password, string $email = '', array $properties = []): TWebUser
@@ -311,6 +444,7 @@ class TWebUserManager extends TDbUserManager
 		if ($password === '') {
 			throw new TInvalidDataValueException('webuser_password_required');
 		}
+		$email = $this->normalizeEmail($email);
 		$this->ensureTables();
 		if ($this->findUserByName($username) !== null) {
 			throw new TInvalidDataValueException('webuser_name_taken', $username);
@@ -336,10 +470,31 @@ class TWebUserManager extends TDbUserManager
 		$command->bindValue(':status', (int) $status, PDO::PARAM_INT);
 		$command->bindValue(':registered', $now, PDO::PARAM_INT);
 		$command->bindValue(':ip', (string) ($properties['RegisteredIp'] ?? ''), PDO::PARAM_STR);
-		$command->execute();
+		try {
+			$command->execute();
+		} catch (TDbException $e) {
+			// The unique index refused a name registered between the check above and this insert.
+			if ($this->findRow('user_name', $username, true) !== null) {
+				throw new TInvalidDataValueException('webuser_name_taken', $username, $e);
+			}
 
-		$user = $this->findUserByName($username);
-		assert($user !== null);
+			throw $e;
+		}
+
+		$row = $this->findRowByNameExactly($username);
+		assert($row !== null);
+		$user = $this->populateUser($row);
+		// Two registrations at once can both pass the checks above where no index enforces them: a
+		// name differing only in case on a table made before names were folded, or a shared email.
+		// The later row gives way to the earlier.
+		if ($this->hasEarlierRow('user_name', $username, $user->getID())) {
+			$this->deleteRow($user->getID());
+			throw new TInvalidDataValueException('webuser_name_taken', $username);
+		}
+		if ($email !== '' && !$this->getAllowDuplicateEmail() && $this->hasEarlierRow('user_email', $email, $user->getID())) {
+			$this->deleteRow($user->getID());
+			throw new TInvalidDataValueException('webuser_email_taken', $email);
+		}
 		$this->onUserCreated($user);
 
 		return $user;
@@ -362,7 +517,8 @@ class TWebUserManager extends TDbUserManager
 	 * moved on since it was written.
 	 *
 	 * An account that may not sign in fails here even when the password is right, and a name that
-	 * does not exist is checked against a dummy hash so that the two take the same time.
+	 * does not exist costs a password hash, so that the two take the same time. Names match
+	 * without regard to case or surrounding spaces.
 	 *
 	 * @param string $username the name to check
 	 * @param string $password the password to check
@@ -371,9 +527,11 @@ class TWebUserManager extends TDbUserManager
 	public function verifyCredentials(string $username, #[\SensitiveParameter] string $password): ?TWebUser
 	{
 		$this->ensureTables();
-		$row = $this->findRow('user_name', $username);
+		$row = $this->findRow('user_name', trim($username), true);
 		if ($row === null) {
-			password_verify($password, self::TIMING_HASH);
+			// Hashing costs what verifying a current hash costs, at whatever algorithm and cost
+			// hashPassword() uses on this PHP, so "no such user" cannot be told from "wrong password".
+			$this->hashPassword($password);
 
 			return null;
 		}
@@ -406,18 +564,39 @@ class TWebUserManager extends TDbUserManager
 		if ($password === '') {
 			throw new TInvalidDataValueException('webuser_password_required');
 		}
-		$this->writePasswordHash($user->getID(), $this->hashPassword($password));
+		$hash = $this->hashPassword($password);
+		$this->writePasswordHash($user->getID(), $hash);
 		$this->revokeTokens($user->getID());
+		$user->setPasswordStamp($this->passwordStamp($hash));
+		$this->keepCurrentSession($user->getID(), $hash);
 		$this->onPasswordChanged($user);
 	}
 
 	/**
-	 * @param string $username the name to load
+	 * Keeps the session of the person who changed their own password: every other session of
+	 * the account ends at its next request, but this one is written again with the new stamp.
+	 * @param int $userId the account whose password changed
+	 * @param string $hash the new password hash
+	 */
+	protected function keepCurrentSession(int $userId, string $hash): void
+	{
+		$current = Prado::getApplication()?->getUser();
+		if (!($current instanceof TWebUser) || $current->getIsGuest() || $current->getID() !== $userId) {
+			return;
+		}
+		$current->setPasswordStamp($this->passwordStamp($hash));
+		foreach ($this->getAuthManagers() as $auth) {
+			$auth->updateSessionUser($current);
+		}
+	}
+
+	/**
+	 * @param string $username the name to load, matched without regard to case
 	 * @return null|\Belisoful\Prado\Security\TWebUser the account, or null when there is no such name
 	 */
 	public function findUserByName(string $username): ?TWebUser
 	{
-		$row = $this->findRow('user_name', $username);
+		$row = $this->findRow('user_name', trim($username), true);
 
 		return $row === null ? null : $this->populateUser($row);
 	}
@@ -434,12 +613,13 @@ class TWebUserManager extends TDbUserManager
 	}
 
 	/**
-	 * @param string $email the address to load
+	 * @param string $email the address to load, matched without regard to case
 	 * @return null|\Belisoful\Prado\Security\TWebUser the account, or null when no account has the address
 	 */
 	public function findUserByEmail(string $email): ?TWebUser
 	{
-		$row = $this->findRow('user_email', $email);
+		$email = trim($email);
+		$row = $email === '' ? null : $this->findRow('user_email', $email, true);
 
 		return $row === null ? null : $this->populateUser($row);
 	}
@@ -453,11 +633,9 @@ class TWebUserManager extends TDbUserManager
 	public function activateWithToken(string $token): ?TWebUser
 	{
 		$user = $this->consumeToken($token, self::TOKEN_ACTIVATION);
-		if ($user === null || $user->getStatus() !== self::STATUS_PENDING_EMAIL) {
+		if ($user === null || !$this->moveStatus($user, [self::STATUS_PENDING_EMAIL], $this->getActivatedStatus())) {
 			return null;
 		}
-		$status = $this->getRequireApproval() ? self::STATUS_PENDING_APPROVAL : self::STATUS_ACTIVE;
-		$this->writeStatus($user, $status);
 		$this->onUserActivated($user);
 
 		return $user;
@@ -472,6 +650,10 @@ class TWebUserManager extends TDbUserManager
 	 */
 	public function resetPasswordWithToken(string $token, #[\SensitiveParameter] string $password): ?TWebUser
 	{
+		// Refused before the token is spent, so the link still works for a second try.
+		if ($password === '') {
+			throw new TInvalidDataValueException('webuser_password_required');
+		}
 		$user = $this->consumeToken($token, self::TOKEN_PASSWORD_RESET);
 		if ($user === null) {
 			return null;
@@ -484,11 +666,13 @@ class TWebUserManager extends TDbUserManager
 	/**
 	 * Lets an account in that was waiting for approval.
 	 * @param \Belisoful\Prado\Security\TWebUser $user the account to approve
-	 * @throws \Prado\Exceptions\TInvalidOperationException when the account is not stored.
+	 * @throws \Prado\Exceptions\TInvalidOperationException when the account is not stored, or is not waiting for approval.
 	 */
 	public function approveUser(TWebUser $user): void
 	{
-		$this->writeStatus($user, self::STATUS_ACTIVE);
+		if (!$this->moveStatus($user, [self::STATUS_PENDING_APPROVAL], self::STATUS_ACTIVE)) {
+			throw new TInvalidOperationException('webuser_approve_status', $user->getName());
+		}
 		$this->onUserApproved($user);
 	}
 
@@ -496,11 +680,13 @@ class TWebUserManager extends TDbUserManager
 	 * Refuses an account. The name stays taken, so the same name cannot be registered again to
 	 * get around the refusal.
 	 * @param \Belisoful\Prado\Security\TWebUser $user the account to refuse
-	 * @throws \Prado\Exceptions\TInvalidOperationException when the account is not stored.
+	 * @throws \Prado\Exceptions\TInvalidOperationException when the account is not stored, or is not waiting for confirmation or approval.
 	 */
 	public function declineUser(TWebUser $user): void
 	{
-		$this->writeStatus($user, self::STATUS_DISABLED);
+		if (!$this->moveStatus($user, [self::STATUS_PENDING_EMAIL, self::STATUS_PENDING_APPROVAL], self::STATUS_DISABLED)) {
+			throw new TInvalidOperationException('webuser_decline_status', $user->getName());
+		}
 		$this->revokeTokens($user->getID());
 		$this->onUserDeclined($user);
 	}
@@ -508,11 +694,14 @@ class TWebUserManager extends TDbUserManager
 	/**
 	 * Suspends an account and revokes its tokens, so a remembered browser is signed out too.
 	 * @param \Belisoful\Prado\Security\TWebUser $user the account to suspend
-	 * @throws \Prado\Exceptions\TInvalidOperationException when the account is not stored.
+	 * @throws \Prado\Exceptions\TInvalidOperationException when the account is not stored, or is deleted.
 	 */
 	public function disableUser(TWebUser $user): void
 	{
-		$this->writeStatus($user, self::STATUS_DISABLED);
+		$from = [self::STATUS_ACTIVE, self::STATUS_PENDING_EMAIL, self::STATUS_PENDING_APPROVAL, self::STATUS_DISABLED];
+		if (!$this->moveStatus($user, $from, self::STATUS_DISABLED)) {
+			throw new TInvalidOperationException('webuser_disable_status', $user->getName());
+		}
 		$this->revokeTokens($user->getID());
 		$this->onUserDisabled($user);
 	}
@@ -520,11 +709,13 @@ class TWebUserManager extends TDbUserManager
 	/**
 	 * Returns a suspended account to good standing.
 	 * @param \Belisoful\Prado\Security\TWebUser $user the account to restore
-	 * @throws \Prado\Exceptions\TInvalidOperationException when the account is not stored.
+	 * @throws \Prado\Exceptions\TInvalidOperationException when the account is not stored, or is not suspended.
 	 */
 	public function enableUser(TWebUser $user): void
 	{
-		$this->writeStatus($user, self::STATUS_ACTIVE);
+		if (!$this->moveStatus($user, [self::STATUS_DISABLED], self::STATUS_ACTIVE)) {
+			throw new TInvalidOperationException('webuser_enable_status', $user->getName());
+		}
 		$this->onUserEnabled($user);
 	}
 
@@ -551,11 +742,7 @@ class TWebUserManager extends TDbUserManager
 	{
 		$this->assertStored($user);
 		$this->revokeTokens($user->getID());
-		$command = $this->getDbConnection()->createCommand(
-			'DELETE FROM ' . $this->getTableName() . ' WHERE id = :id'
-		);
-		$command->bindValue(':id', $user->getID(), PDO::PARAM_INT);
-		$command->execute();
+		$this->deleteRow($user->getID());
 	}
 
 	/**
@@ -625,8 +812,12 @@ class TWebUserManager extends TDbUserManager
 			return null;
 		}
 		$user = $this->findUserById((int) $row['user_id']);
+		if ($user === null || !$user->getCanLogin()) {
+			return null;
+		}
+		$this->touchAccessTime($user);
 
-		return ($user === null || !$user->getCanLogin()) ? null : $user;
+		return $user;
 	}
 
 	/**
@@ -702,7 +893,11 @@ class TWebUserManager extends TDbUserManager
 			'DELETE FROM ' . $this->getTokenTableName() . ' WHERE token_id = :id'
 		);
 		$command->bindValue(':id', (int) $row['token_id'], PDO::PARAM_INT);
-		$command->execute();
+		// Two requests can read the same token at once; only the one whose delete removed it may
+		// spend it.
+		if ($command->execute() !== 1) {
+			return null;
+		}
 
 		return $this->findUserById((int) $row['user_id']);
 	}
@@ -766,14 +961,14 @@ class TWebUserManager extends TDbUserManager
 	 * @param \Belisoful\Prado\Security\TWebUser $user the account to change
 	 * @param array $properties any of Email, DisplayName, Url
 	 * @throws \Prado\Exceptions\TInvalidOperationException when the account is not stored.
-	 * @throws \Prado\Exceptions\TInvalidDataValueException when the email belongs to another account.
+	 * @throws \Prado\Exceptions\TInvalidDataValueException when the email is not an address, or belongs to another account.
 	 */
 	public function updateProfile(TWebUser $user, array $properties): void
 	{
 		$this->assertStored($user);
 		$columns = [];
 		if (array_key_exists('Email', $properties)) {
-			$email = trim((string) $properties['Email']);
+			$email = $this->normalizeEmail((string) $properties['Email']);
 			$owner = $email === '' ? null : $this->findUserByEmail($email);
 			if ($owner !== null && $owner->getID() !== $user->getID() && !$this->getAllowDuplicateEmail()) {
 				throw new TInvalidDataValueException('webuser_email_taken', $email);
@@ -1004,23 +1199,36 @@ class TWebUserManager extends TDbUserManager
 		$userId = $user->getID();
 		$code = (string) preg_replace('/[\s-]+/', '', $code);
 		$rows = $this->readTokenRows($userId, self::TOKEN_ACTIVATION_CODE);
-		$expected = $rows === [] ? '' : (string) $rows[0]['token_hash'];
+		// Hashed even when there is no code, so a missing code takes as long as a wrong one.
 		$guessed = $this->hashCode($userId, $code);
-		// Compared even when there is no code, so a missing code takes as long as a wrong one.
-		$right = $expected !== '' && hash_equals($expected, $guessed) && ctype_digit($code);
+		if ($rows === []) {
+			return false;
+		}
+		// The guess is counted before it is judged, so guesses sent at the same moment cannot
+		// slip past the limit between one another's count and record.
+		$this->insertTokenRow($userId, self::TOKEN_CODE_FAILURE, '', $this->getTokenLifetime());
+		$guesses = count($this->readTokenRows($userId, self::TOKEN_CODE_FAILURE));
+		$right = $guesses <= self::CODE_ATTEMPTS && ctype_digit($code) && hash_equals((string) $rows[0]['token_hash'], $guessed);
 		if (!$right) {
-			if ($expected !== '') {
-				$this->insertTokenRow($userId, self::TOKEN_CODE_FAILURE, '', $this->getTokenLifetime());
-				if (count($this->readTokenRows($userId, self::TOKEN_CODE_FAILURE)) >= self::CODE_ATTEMPTS) {
-					$this->revokeTokens($userId, self::TOKEN_ACTIVATION_CODE);
-				}
+			if ($guesses >= self::CODE_ATTEMPTS) {
+				$this->revokeTokens($userId, self::TOKEN_ACTIVATION_CODE);
 			}
 
 			return false;
 		}
-		$this->revokeTokens($userId, self::TOKEN_ACTIVATION_CODE);
+		// Spending the code is what lets a request go on; a second right guess sent at the same
+		// moment finds it gone.
+		$command = $this->getDbConnection()->createCommand(
+			'DELETE FROM ' . $this->getTokenTableName() . ' WHERE token_id = :id'
+		);
+		$command->bindValue(':id', (int) $rows[0]['token_id'], PDO::PARAM_INT);
+		if ($command->execute() !== 1) {
+			return false;
+		}
 		$this->revokeTokens($userId, self::TOKEN_CODE_FAILURE);
-		$this->writeStatus($user, $this->getRequireApproval() ? self::STATUS_PENDING_APPROVAL : self::STATUS_ACTIVE);
+		if (!$this->moveStatus($user, [self::STATUS_PENDING_EMAIL], $this->getActivatedStatus())) {
+			return false;
+		}
 		$this->onUserActivated($user);
 
 		return true;
@@ -1324,18 +1532,86 @@ class TWebUserManager extends TDbUserManager
 	/**
 	 * @param string $column the column to match
 	 * @param mixed $value what to match it against
-	 * @return null|array the account row, or null when nothing matches
+	 * @param bool $ignoreCase whether the match ignores case, as names and emails do
+	 * @return null|array the oldest matching account row, or null when nothing matches
 	 */
-	protected function findRow(string $column, $value): ?array
+	protected function findRow(string $column, $value, bool $ignoreCase = false): ?array
 	{
 		$this->ensureTables();
 		$command = $this->getDbConnection()->createCommand(
-			'SELECT * FROM ' . $this->getTableName() . ' WHERE ' . $column . ' = :value'
+			'SELECT * FROM ' . $this->getTableName() . ' WHERE ' . ($ignoreCase ? $this->equalsIgnoringCase($column) : $column . ' = :value')
+			. ' ORDER BY id'
 		);
 		$command->bindValue(':value', $value, is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR);
 		$row = $command->query()->read();
 
 		return $row === false ? null : $row;
+	}
+
+	/**
+	 * @param string $username the name exactly as stored
+	 * @return null|array the row of that name
+	 */
+	protected function findRowByNameExactly(string $username): ?array
+	{
+		return $this->findRow('user_name', $username);
+	}
+
+	/**
+	 * @param string $column user_name or user_email
+	 * @param string $value the name or address
+	 * @param int $id the row to look before
+	 * @return bool whether an older row holds the same value, ignoring case
+	 */
+	protected function hasEarlierRow(string $column, string $value, int $id): bool
+	{
+		$command = $this->getDbConnection()->createCommand(
+			'SELECT COUNT(*) FROM ' . $this->getTableName() . ' WHERE ' . $this->equalsIgnoringCase($column) . ' AND id < :id'
+		);
+		$command->bindValue(':value', $value, PDO::PARAM_STR);
+		$command->bindValue(':id', $id, PDO::PARAM_INT);
+
+		return (int) $command->queryScalar() > 0;
+	}
+
+	/**
+	 * @param int $id the account row to remove
+	 */
+	protected function deleteRow(int $id): void
+	{
+		$command = $this->getDbConnection()->createCommand('DELETE FROM ' . $this->getTableName() . ' WHERE id = :id');
+		$command->bindValue(':id', $id, PDO::PARAM_INT);
+		$command->execute();
+	}
+
+	/**
+	 * @param string $email an address as given
+	 * @throws \Prado\Exceptions\TInvalidDataValueException when it is not empty and not an address.
+	 * @return string the address without surrounding spaces, '' for none
+	 */
+	protected function normalizeEmail(string $email): string
+	{
+		$email = trim($email);
+		if ($email !== '' && filter_var($email, FILTER_VALIDATE_EMAIL, FILTER_FLAG_EMAIL_UNICODE) === false) {
+			throw new TInvalidDataValueException('webuser_email_invalid', $email);
+		}
+
+		return $email;
+	}
+
+	/**
+	 * @param string $column the column to compare with :value
+	 * @return string a condition that holds when the column equals :value, ignoring case
+	 */
+	protected function equalsIgnoringCase(string $column): string
+	{
+		// MySQL's default collations already compare without case, and LOWER() on the column
+		// would keep it from using its index. Elsewhere the index is on LOWER(column).
+		if ($this->getDbConnection()->getDriverName() === TDbDriver::DRIVER_MYSQL) {
+			return $column . ' = :value';
+		}
+
+		return 'LOWER(' . $column . ') = LOWER(:value)';
 	}
 
 	/**
@@ -1348,6 +1624,18 @@ class TWebUserManager extends TDbUserManager
 		$user = Prado::createComponent($this->getUserClass(), $this);
 		assert($user instanceof TWebUser);
 		$user->setIsGuest(false);
+		$this->fillUser($user, $row);
+
+		return $user;
+	}
+
+	/**
+	 * Copies an account row onto a user.
+	 * @param \Belisoful\Prado\Security\TWebUser $user the user to fill
+	 * @param array $row the account row
+	 */
+	protected function fillUser(TWebUser $user, array $row): void
+	{
 		$user->setID((int) $row['id']);
 		$user->setName((string) $row['user_name']);
 		$user->setEmail((string) ($row['user_email'] ?? ''));
@@ -1358,12 +1646,38 @@ class TWebUserManager extends TDbUserManager
 		$user->setRegisteredIp((string) ($row['registered_ip'] ?? ''));
 		$user->setLoginTime((int) ($row['login_time'] ?? 0));
 		$user->setAccessTime((int) ($row['access_time'] ?? 0));
-		$roles = trim((string) ($row['user_roles'] ?? ''));
-		if ($roles !== '') {
-			$user->setRoles($roles);
-		}
+		$user->setRoles(trim((string) ($row['user_roles'] ?? '')));
+		$user->setPasswordStamp($this->passwordStamp((string) $row['user_pass']));
+	}
 
-		return $user;
+	/**
+	 * @param string $hash the stored password hash
+	 * @return string a short fingerprint of it, kept in the session so a password change is
+	 *   noticed; the hash itself never goes there
+	 */
+	protected function passwordStamp(string $hash): string
+	{
+		return substr(hash('sha256', 'webuser-session:' . $hash), 0, 32);
+	}
+
+	/**
+	 * Writes access_time when it has grown more than {@see ACCESS_TIME_RESOLUTION} seconds stale,
+	 * so a busy user costs a write every few minutes rather than on every request.
+	 * @param \Belisoful\Prado\Security\TWebUser $user the user seen now
+	 */
+	protected function touchAccessTime(TWebUser $user): void
+	{
+		$now = time();
+		if ($user->getID() <= 0 || $now - $user->getAccessTime() < self::ACCESS_TIME_RESOLUTION) {
+			return;
+		}
+		$command = $this->getDbConnection()->createCommand(
+			'UPDATE ' . $this->getTableName() . ' SET access_time = :now WHERE id = :id'
+		);
+		$command->bindValue(':now', $now, PDO::PARAM_INT);
+		$command->bindValue(':id', $user->getID(), PDO::PARAM_INT);
+		$command->execute();
+		$user->setAccessTime($now);
 	}
 
 	/**
@@ -1387,8 +1701,9 @@ class TWebUserManager extends TDbUserManager
 		$parameters = [];
 		$query = trim($query);
 		if ($query !== '') {
-			$like = '%' . str_replace(['!', '%', '_'], ['!!', '!%', '!_'], strtolower($query)) . '%';
-			$conditions[] = "(LOWER(user_name) LIKE :q1 ESCAPE '!' OR LOWER(display_name) LIKE :q2 ESCAPE '!' OR LOWER(user_email) LIKE :q3 ESCAPE '!')";
+			$like = '%' . str_replace(['!', '%', '_'], ['!!', '!%', '!_'], $query) . '%';
+			// LOWER() on both sides, so the column and the pattern are folded by the same rules.
+			$conditions[] = "(LOWER(user_name) LIKE LOWER(:q1) ESCAPE '!' OR LOWER(display_name) LIKE LOWER(:q2) ESCAPE '!' OR LOWER(user_email) LIKE LOWER(:q3) ESCAPE '!')";
 			$parameters += [':q1' => $like, ':q2' => $like, ':q3' => $like];
 		}
 		if ($statuses !== null) {
@@ -1427,6 +1742,52 @@ class TWebUserManager extends TDbUserManager
 	}
 
 	/**
+	 * Moves an account to a status only when its row still holds one of the expected statuses, in
+	 * a single statement, so two requests acting at once cannot both move it. The user is kept in
+	 * step with the row.
+	 * @param \Belisoful\Prado\Security\TWebUser $user the account to change
+	 * @param int[] $from the statuses it may be moved from
+	 * @param int $to the status to write
+	 * @throws \Prado\Exceptions\TInvalidOperationException when the account is not stored.
+	 * @return bool whether the row held one of the expected statuses and was moved
+	 */
+	protected function moveStatus(TWebUser $user, array $from, int $to): bool
+	{
+		$this->assertStored($user);
+		$names = [];
+		foreach (array_values($from) as $i => $status) {
+			$names[] = ':from' . $i;
+		}
+		$command = $this->getDbConnection()->createCommand(
+			'UPDATE ' . $this->getTableName() . ' SET status = :status WHERE id = :id AND status IN (' . implode(', ', $names) . ')'
+		);
+		$command->bindValue(':status', $to, PDO::PARAM_INT);
+		$command->bindValue(':id', $user->getID(), PDO::PARAM_INT);
+		foreach (array_values($from) as $i => $status) {
+			$command->bindValue(':from' . $i, (int) $status, PDO::PARAM_INT);
+		}
+		// MySQL counts only rows whose value changed, so a move to the status already held is
+		// read back rather than trusted to the count.
+		if ($command->execute() !== 1) {
+			$row = $this->findRow('id', $user->getID());
+			if ($row === null || (int) $row['status'] !== $to || !in_array($to, $from, true)) {
+				return false;
+			}
+		}
+		$user->setStatus($to);
+
+		return true;
+	}
+
+	/**
+	 * @return int the status a confirmed address moves an account to
+	 */
+	protected function getActivatedStatus(): int
+	{
+		return $this->getRequireApproval() ? self::STATUS_PENDING_APPROVAL : self::STATUS_ACTIVE;
+	}
+
+	/**
 	 * @param int $userId the account to write to
 	 * @param string $hash the password hash to store
 	 */
@@ -1461,18 +1822,25 @@ class TWebUserManager extends TDbUserManager
 		if ($this->_tablesEnsured) {
 			return;
 		}
-		$this->_tablesEnsured = true;
 		$db = $this->getDbConnection();
 		foreach ([$this->getTableName() => 'createUserTable', $this->getTokenTableName() => 'createTokenTable'] as $table => $creator) {
 			try {
 				$db->createCommand('SELECT * FROM ' . $table . ' WHERE 0=1')->query()->close();
 			} catch (\Exception $e) {
 				if (!$this->getAutoCreateTables()) {
-					throw new TConfigurationException('webuser_table_nonexistent', $table);
+					throw new TConfigurationException('webuser_table_nonexistent', $table, $e);
 				}
-				$this->{$creator}();
+				// The probe can fail for reasons other than a missing table. Then the create fails
+				// too, and both errors are reported rather than the first being taken for a gap.
+				try {
+					$this->{$creator}();
+				} catch (\Exception $created) {
+					throw new TConfigurationException('webuser_table_create_failed', $table, $created->getMessage(), $e);
+				}
 			}
 		}
+		// Only once both are there, so a failed attempt is made again on the next call.
+		$this->_tablesEnsured = true;
 	}
 
 	/**
@@ -1482,7 +1850,7 @@ class TWebUserManager extends TDbUserManager
 	{
 		$db = $this->getDbConnection();
 		$table = $this->getTableName();
-		[$autoType, $autoAttributes, $textType] = $this->getDriverTypes();
+		[$autoType, $autoAttributes] = $this->getDriverTypes();
 
 		$db->createCommand('CREATE TABLE ' . $table . ' ('
 			. 'id ' . $autoType . ' PRIMARY KEY' . $autoAttributes . ', '
@@ -1499,8 +1867,11 @@ class TWebUserManager extends TDbUserManager
 			. 'login_ip VARCHAR(45), '
 			. 'access_time INTEGER NOT NULL DEFAULT 0'
 			. ')')->execute();
-		$db->createCommand('CREATE UNIQUE INDEX ' . $table . '_name ON ' . $table . ' (user_name)')->execute();
-		$db->createCommand('CREATE INDEX ' . $table . '_email ON ' . $table . ' (user_email)')->execute();
+		// Names and emails are looked up without case. MySQL's collation already compares that way;
+		// elsewhere the indexes are on LOWER(), which also makes names unique without regard to case.
+		$fold = fn (string $column) => $this->getDbConnection()->getDriverName() === TDbDriver::DRIVER_MYSQL ? $column : 'LOWER(' . $column . ')';
+		$db->createCommand('CREATE UNIQUE INDEX ' . $table . '_name ON ' . $table . ' (' . $fold('user_name') . ')')->execute();
+		$db->createCommand('CREATE INDEX ' . $table . '_email ON ' . $table . ' (' . $fold('user_email') . ')')->execute();
 		$db->createCommand('CREATE INDEX ' . $table . '_status ON ' . $table . ' (status)')->execute();
 	}
 
@@ -1528,17 +1899,21 @@ class TWebUserManager extends TDbUserManager
 	}
 
 	/**
-	 * @return array the auto-increment type, its attributes, and the long text type for this driver
+	 * @throws \Prado\Exceptions\TConfigurationException when the tables cannot be made on this database.
+	 * @return array the auto-increment type and its attributes for this driver
 	 */
 	protected function getDriverTypes(): array
 	{
-		switch ($this->getDbConnection()->getDriverName()) {
+		$driver = $this->getDbConnection()->getDriverName();
+		switch ($driver) {
 			case TDbDriver::DRIVER_SQLITE:
-				return ['INTEGER', ' AUTOINCREMENT', 'MEDIUMTEXT'];
+				return ['INTEGER', ' AUTOINCREMENT'];
 			case TDbDriver::DRIVER_PGSQL:
-				return ['SERIAL', '', 'TEXT'];
-			default:	// mysql
-				return ['INTEGER', ' AUTO_INCREMENT', 'MEDIUMTEXT'];
+				return ['SERIAL', ''];
+			case TDbDriver::DRIVER_MYSQL:
+				return ['INTEGER', ' AUTO_INCREMENT'];
+			default:
+				throw new TConfigurationException('webuser_driver_unsupported', $driver);
 		}
 	}
 }

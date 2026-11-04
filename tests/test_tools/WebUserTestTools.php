@@ -9,10 +9,13 @@
  * queries against a real database.
  *
  * Each connection is its own in-memory SQLite database, so one test cannot see another's accounts.
+ * Set WEBUSER_TEST_DSN (with WEBUSER_TEST_USERNAME and WEBUSER_TEST_PASSWORD) to run the suite on
+ * MySQL or PostgreSQL instead; each manager then gets tables of its own names in that database.
  */
 
 use Belisoful\Prado\Security\TWebUserManager;
 use Prado\Data\TDbConnection;
+use Prado\TApplication;
 
 class TestWebUserManager extends TWebUserManager
 {
@@ -42,21 +45,59 @@ class WebUserTestTools
 	 */
 	public static function createConnection(): TDbConnection
 	{
-		$connection = new TDbConnection('sqlite::memory:');
+		$dsn = (string) getenv('WEBUSER_TEST_DSN');
+		$connection = $dsn === ''
+			? new TDbConnection('sqlite::memory:')
+			: new TDbConnection($dsn, (string) getenv('WEBUSER_TEST_USERNAME'), (string) getenv('WEBUSER_TEST_PASSWORD'));
 		$connection->setActive(true);
 
 		return $connection;
 	}
 
 	/**
+	 * @return bool whether the suite runs on a shared database server rather than SQLite in memory
+	 */
+	public static function onServer(): bool
+	{
+		return (string) getenv('WEBUSER_TEST_DSN') !== '';
+	}
+
+	/**
+	 * Builds an application with this test's own runtime directory. It becomes the global
+	 * application, so a test that calls this runs in a separate process.
+	 * @return \Prado\TApplication the application
+	 */
+	public static function createApplication(): TApplication
+	{
+		$base = sys_get_temp_dir() . '/webuser_app_' . bin2hex(random_bytes(6));
+		mkdir($base . '/runtime', 0o777, true);
+		register_shutdown_function(static function () use ($base) {
+			$files = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($base, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST);
+			foreach ($files as $file) {
+				$file->isDir() ? rmdir($file->getPathname()) : unlink($file->getPathname());
+			}
+			rmdir($base);
+		});
+
+		return new TApplication($base);
+	}
+
+	/**
 	 * @param array $properties properties to set before init, as name => value
+	 * @param null|\TestWebUserManager $manager the manager to set up, a plain one when null
 	 * @return \TestWebUserManager an initialized manager on a fresh database
 	 */
-	public static function createManager(array $properties = []): TestWebUserManager
+	public static function createManager(array $properties = [], ?TestWebUserManager $manager = null): TestWebUserManager
 	{
-		$manager = new TestWebUserManager();
+		$manager ??= new TestWebUserManager();
 		$manager->setTestDbConnection(self::createConnection());
 		$manager->setID('users');
+		if (self::onServer()) {
+			// Tables of this manager's own, so tests on one server cannot see each other's rows.
+			$suffix = bin2hex(random_bytes(5));
+			$manager->setTableName('users_' . $suffix);
+			$manager->setTokenTableName('user_tokens_' . $suffix);
+		}
 		foreach ($properties as $name => $value) {
 			$manager->{'set' . $name}($value);
 		}

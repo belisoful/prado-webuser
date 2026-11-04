@@ -25,8 +25,8 @@ class TWebUserManagerTest extends PHPUnit\Framework\TestCase
 		$this->assertTrue($manager->getRequireEmailVerification());
 		$this->assertFalse($manager->getRequireApproval());
 		$this->assertFalse($manager->getAllowDuplicateEmail());
-		$this->assertSame('users', $manager->getTableName());
-		$this->assertSame('user_tokens', $manager->getTokenTableName());
+		$this->assertSame('users', (new TWebUserManager())->getTableName());
+		$this->assertSame('user_tokens', (new TWebUserManager())->getTokenTableName());
 		$this->assertSame(TWebUserManager::STATUS_PENDING_EMAIL, $manager->getInitialStatus());
 	}
 
@@ -358,8 +358,9 @@ class TWebUserManagerTest extends PHPUnit\Framework\TestCase
 		$manager->enableUser($user);
 		$this->assertSame(TWebUserManager::STATUS_ACTIVE, $manager->findUserByName('rayelan')->getStatus());
 
-		$manager->declineUser($user);
-		$this->assertSame(TWebUserManager::STATUS_DISABLED, $manager->findUserByName('rayelan')->getStatus());
+		$waiting = $manager->createUser('hobie', 'correct horse');
+		$manager->declineUser($waiting);
+		$this->assertSame(TWebUserManager::STATUS_DISABLED, $manager->findUserByName('hobie')->getStatus());
 	}
 
 	public function testEachLifecycleStepRaisesItsEvent()
@@ -371,9 +372,10 @@ class TWebUserManagerTest extends PHPUnit\Framework\TestCase
 				$raised[] = $event;
 			});
 		}
+		$manager->setRequireApproval(true);
 		$user = $manager->createUser('rayelan', 'correct horse');
 		$manager->approveUser($user);
-		$manager->declineUser($user);
+		$manager->declineUser($manager->createUser('hobie', 'correct horse'));
 		$manager->disableUser($user);
 		$manager->enableUser($user);
 		$manager->changePassword($user, 'a new password');

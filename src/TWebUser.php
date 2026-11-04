@@ -22,7 +22,9 @@ use Prado\Web\THttpCookie;
  * seen.
  *
  * Every field is held in the user's state, which is what {@see \Prado\Security\TUser::saveToString}
- * writes to the session, so a signed-in user is restored without reading the database again.
+ * writes to the session. When the session is read back, {@see loadFromString} checks the user
+ * against its row, so a suspended or deleted account, or one whose password has changed, is signed
+ * out at its next request ({@see \Belisoful\Prado\Security\TWebUserManager::getRevalidateSessions}).
  *
  * The three methods the framework calls on the factory instance -- {@see validateUser},
  * {@see createUser}, and {@see createUserFromCookie} -- all hand the work to the manager, which
@@ -186,6 +188,51 @@ class TWebUser extends TDbUser
 	public function setAccessTime($value): void
 	{
 		$this->setState('accessTime', TPropertyValue::ensureInteger($value), 0);
+	}
+
+	/**
+	 * @return string the fingerprint of the password hash the session began with
+	 * @since 1.0.0
+	 */
+	public function getPasswordStamp(): string
+	{
+		return (string) $this->getState('passwordStamp', '');
+	}
+
+	/**
+	 * @param string $value the fingerprint of the account's current password hash
+	 * @since 1.0.0
+	 */
+	public function setPasswordStamp($value): void
+	{
+		$this->setState('passwordStamp', TPropertyValue::ensureString($value), '');
+	}
+
+	/**
+	 * Restores the user from the session, then checks it against its row: an account that is gone,
+	 * may no longer sign in, or has a new password comes back as a guest.
+	 * @param string $data the user data the session holds
+	 * @return \Belisoful\Prado\Security\TWebUser this user
+	 * @since 1.0.0
+	 */
+	public function loadFromString($data)
+	{
+		parent::loadFromString($data);
+		if (!$this->getIsGuest()) {
+			$this->getWebUserManager()->revalidateUser($this);
+		}
+
+		return $this;
+	}
+
+	/**
+	 * Forgets everything about the account, leaving a guest.
+	 * @since 1.0.0
+	 */
+	public function signOut(): void
+	{
+		parent::loadFromString(serialize([]));
+		$this->setIsGuest(true);
 	}
 
 	/**

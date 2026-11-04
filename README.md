@@ -27,7 +27,8 @@ composer require belisoful/prado-webuser
 
 Loading the extension by its package name (`<module id="belisoful/prado-webuser" />`) also works;
 the class then comes from `extra.prado.bootstrap`. The `users` and `user_tokens` tables are
-created on first use unless `AutoCreateTables` says otherwise.
+created on first use on MySQL, PostgreSQL, and SQLite unless `AutoCreateTables` says otherwise; on
+another database, create them by hand.
 
 
 What an account may do
@@ -61,17 +62,51 @@ $users->approveUser($user);                     // when RequireApproval is on
 Password reset is the same shape: `issuePasswordResetToken()`, then
 `resetPasswordWithToken($token, $newPassword)`.
 
+A short code works as well as a link, for an address a person reads on another device:
+`issueActivationCode($user)` makes a six-digit code, `activateWithCode($user, $code)` confirms it,
+and `sendActivationCodeEmail($user)` mails it. A code lasts thirty minutes and dies after five wrong
+guesses.
+
+Each move checks the status the account holds in the database: `approveUser()` takes an account
+waiting for approval, `declineUser()` one waiting for confirmation or approval, `enableUser()` a
+suspended one, and `disableUser()` anything but a deleted one. A move from any other status throws
+`TInvalidOperationException`, so a deleted account cannot be approved back into use.
+
 Every step raises an event -- `onUserCreated`, `onUserActivated`, `onUserApproved`,
-`onUserDeclined`, `onUserDisabled`, `onUserEnabled`, `onUserDeleted`, `onPasswordChanged` -- so
+`onUserDeclined`, `onUserDisabled`, `onUserEnabled`, `onUserUpdated`, `onUserDeleted`,
+`onPasswordChanged` -- so
 sending the mail, writing the audit line, or seeding a profile hangs off the manager rather than
 off whichever page happened to call it.
+
+
+Names, emails, and profiles
+---------------------------
+
+Names and email addresses are matched without regard to case or surrounding spaces, so `Rayelan`
+and `rayelan` are one name, and an email must be an address. `updateProfile($user, ['Email' => ...,
+'DisplayName' => ..., 'Url' => ...])` changes what an account says about itself, and
+`searchUsers($query, $statuses)` with `countUsers()` finds accounts by any part of the name,
+display name, or email, newest first.
+
+
+Sessions
+--------
+
+A signed-in user is checked against its row on every request, one primary key query. Suspending
+or deleting an account, or changing its password, signs it out everywhere at its next request; the
+person who changes their own password stays signed in. `RevalidateSessions="false"` turns the check
+off, and with it this guarantee.
+
+The manager listens to the `TAuthManager` that uses it: a sign-in is written with `recordLogin()`,
+signing out revokes that browser's remember-me token, and `access_time` is kept within five minutes.
 
 
 Passwords and tokens
 --------------------
 
 Passwords are stored with `password_hash()`, and a hash left behind by an older algorithm or cost
-is replaced on the next correct sign-in.
+is replaced on the next correct sign-in. A name that does not exist costs a password hash too, so
+it cannot be told from a wrong password by timing.
 
 A token is a selector and a secret half. Only the selector and a SHA-256 hash of the secret are
 stored, and they are compared with `hash_equals()`, so the token table cannot be used to take an

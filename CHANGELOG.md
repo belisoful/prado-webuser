@@ -7,9 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- A signed-in user is checked against its row on every request (`RevalidateSessions`, on by
+  default). Suspending, declining, deleting, or purging an account, or changing its password, now
+  ends its live sessions, not only its remember-me tokens. The person changing their own password
+  keeps their session.
+- Signing out through `TAuthManager` revokes that browser's remember-me token in the database, so a
+  copied cookie stops working with it. The manager binds to the auth managers that use it once the
+  application finishes initializing (`bindAuthManagers()`).
+- A name that does not exist now costs a `password_hash()` at the current algorithm and cost. The
+  fixed dummy hash was cost 10, so on PHP 8.4 and newer, where the default cost is 12, an unknown
+  name answered about four times faster than a real one.
+- Names and emails are matched without regard to case on every database, and names are unique
+  without regard to case. On SQLite and PostgreSQL, `Bob` and `bob` could be two accounts, and an
+  email in another case got past the duplicate check and failed a reset lookup.
+- A single-use token, or an activation code, is spent only by the request whose delete removed it,
+  so two requests at once cannot both use it. Code guesses are counted before they are judged, so
+  guesses sent together cannot get past the limit.
+- `approveUser()`, `declineUser()`, `enableUser()`, and `disableUser()` move an account only from
+  the statuses that make sense, checked against the row in the same statement, and throw
+  `TInvalidOperationException` otherwise. Approving a deleted account no longer brings it back.
+
+### Fixed
+
+- `resetPasswordWithToken()` refuses an empty password before it spends the token, so the link
+  still works for a second try.
+- Two registrations racing for a name or email: the later one gets `webuser_name_taken` or
+  `webuser_email_taken`, not a database error or a second account.
+- An email must be an address, and is stored without surrounding spaces.
+- Sign-in ignores spaces around the name, as registration does.
+- `recordLogin()` runs on every sign-in through `TAuthManager`, and `access_time` is kept within
+  five minutes on each request and remembered-browser return.
+- A failed table creation is reported with its cause and tried again, rather than masked and never
+  retried. On a database other than MySQL, PostgreSQL, or SQLite, creating the tables is a clear
+  configuration error.
+- Search folds the pattern with the database's `LOWER()`, as it folds the columns.
+
 ### Changed
 
 - Requires PHP 8.2, as PRADO 4.4 does; the CI matrix starts at 8.2.
+- The unit suite also runs on MySQL and PostgreSQL in CI, and the workflow's actions are current.
 - The error messages in `config/errorMessages.txt` are ICU MessageFormat patterns, which PRADO 4.4
   formats them as, so a quoted argument is written `''{0}''`. Written `'{0}'`, it rendered the
   literal `{0}`. The package standard checks lint every message as an ICU pattern.

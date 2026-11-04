@@ -15,6 +15,9 @@
 | `composer unittest` | The unit suite |
 | `composer coverage` | Unit suite with a text and Clover report |
 | `composer integration` | The Composer install test (needs a PRADO checkout, default `../prado.master`) |
+
+The unit suite runs on SQLite in memory. Set `WEBUSER_TEST_DSN`, `WEBUSER_TEST_USERNAME`, and
+`WEBUSER_TEST_PASSWORD` to run it on MySQL or PostgreSQL; CI does both.
 | `composer fulltest` | The full check, in order |
 
 Run one test or file with
@@ -27,13 +30,13 @@ order. All four must pass before code is ready to commit.**
 ## Architecture
 
 ```
-src/TWebUserManager.php   the example bootstrap module (TPluginModule)
-src/Pages/Example.page     a page the module mounts on the page service
+src/TWebUserManager.php   the bootstrap module: a TDbUserManager that owns every query
+src/TWebUser.php           the account record, held in the user's session state
 config/classes.json        Prado3 short name => FQN, registered by extra.prado.class-map
 config/errorMessages.txt   message code => text, registered by extra.prado.error-messages
 tests/unit/Package/        the package standard checks, inherited by every extension
 tests/integration/         installs the package into a throwaway consumer and checks the wiring
-tests/test_tools/          phpunit and phpstan bootstraps, the coverage floor check
+tests/test_tools/          phpunit and phpstan bootstraps, test doubles, the coverage floor check
 agents/                    working files for coding agents
 ```
 

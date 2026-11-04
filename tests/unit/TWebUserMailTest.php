@@ -40,18 +40,13 @@ class TWebUserMailTest extends PHPUnit\Framework\TestCase
 	 */
 	private function manager(array $properties = []): CapturingWebUserManager
 	{
-		$manager = new CapturingWebUserManager();
-		$manager->setTestDbConnection(WebUserTestTools::createConnection());
-		$manager->setID('users');
 		$properties += [
 			'ActivationUrl' => 'https://example.com/activate?token={token}',
 			'PasswordResetUrl' => 'https://example.com/reset?token={token}',
 			'SiteName' => 'Example',
 		];
-		foreach ($properties as $name => $value) {
-			$manager->{'set' . $name}($value);
-		}
-		$manager->init(null);
+		$manager = WebUserTestTools::createManager($properties, new CapturingWebUserManager());
+		assert($manager instanceof CapturingWebUserManager);
 
 		return $manager;
 	}

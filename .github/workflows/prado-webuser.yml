@@ -26,7 +26,7 @@ jobs:
 
     steps:
       - name: Checkout extension
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup PHP, with composer and extensions
         uses: shivammathur/setup-php@v2
@@ -45,7 +45,7 @@ jobs:
         run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
 
       - name: Cache dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           # composer.lock is not committed, so the key hashes composer.json instead.
           path: ${{ steps.composer-cache.outputs.dir }}
@@ -86,18 +86,76 @@ jobs:
           # Raise this floor as the suite grows; never lower it to make a red build green.
           php tests/test_tools/check-coverage.php build/logs/clover.xml 90
 
+  databases:
+    # The extension job runs on SQLite in memory. The table definitions, case folding, and
+    # concurrency guards differ by driver, so the suite runs again on the servers sites use.
+    name: Unit tests on ${{ matrix.database }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - database: MySQL
+            dsn: 'mysql:host=127.0.0.1;port=3306;dbname=webuser_test;charset=utf8mb4'
+            username: root
+            password: root
+          - database: PostgreSQL
+            dsn: 'pgsql:host=127.0.0.1;port=5432;dbname=webuser_test'
+            username: postgres
+            password: postgres
+
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: webuser_test
+        ports:
+          - 3306:3306
+        options: --health-cmd="mysqladmin ping -proot" --health-interval=5s --health-timeout=5s --health-retries=20
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: webuser_test
+        ports:
+          - 5432:5432
+        options: --health-cmd=pg_isready --health-interval=5s --health-timeout=5s --health-retries=20
+
+    steps:
+      - name: Checkout extension
+        uses: actions/checkout@v7
+
+      - name: Setup PHP, with composer and extensions
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: ctype, dom, intl, json, mbstring, pcre, pdo, pdo_mysql, pdo_pgsql, pdo_sqlite, spl, zlib
+          coverage: none
+
+      - name: Install Composer dependencies
+        run: composer install --no-progress --prefer-dist --optimize-autoloader
+
+      - name: Run Unit Tests
+        env:
+          WEBUSER_TEST_DSN: ${{ matrix.dsn }}
+          WEBUSER_TEST_USERNAME: ${{ matrix.username }}
+          WEBUSER_TEST_PASSWORD: ${{ matrix.password }}
+        run: composer unittest
+
   integration:
     name: Composer extension install
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout extension
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: prado-webuser
 
       - name: Checkout PRADO framework (4.4 dev)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: pradosoft/prado
           ref: master
