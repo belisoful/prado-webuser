@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Requires PHP 8.2, as PRADO 4.4 does; the CI matrix starts at 8.2.
+- The error messages in `config/errorMessages.txt` are ICU MessageFormat patterns, which PRADO 4.4
+  formats them as, so a quoted argument is written `''{0}''`. Written `'{0}'`, it rendered the
+  literal `{0}`. The package standard checks lint every message as an ICU pattern.
+
 ### Added
 
 - Activation codes: `issueActivationCode()` makes a six-digit code a person can type or follow

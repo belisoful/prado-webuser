@@ -81,6 +81,8 @@ class TWebUserManagerTest extends PHPUnit\Framework\TestCase
 		$manager->createUser('rayelan', 'correct horse');
 
 		$this->expectException(TInvalidDataValueException::class);
+		// The message file is ICU MessageFormat, so ''{0}'' renders the name in single quotes.
+		$this->expectExceptionMessage("The user name 'rayelan' is already taken.");
 		$manager->createUser('rayelan', 'another password');
 	}
 

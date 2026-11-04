@@ -153,10 +153,12 @@ class PackageStandardTest extends PHPUnit\Framework\TestCase
 		$this->assertNotEmpty(self::$composer['description'] ?? '', 'the package has a description');
 		$this->assertNotEmpty(self::$composer['license'] ?? '', 'the package declares a license');
 		$this->assertArrayHasKey('pradosoft/prado', self::$composer['require'] ?? [], 'the package requires the framework');
+		// PRADO 4.4 requires PHP 8.2, and a lower floor here lets Composer resolve a platform
+		// the framework refuses to install on.
 		$this->assertMatchesRegularExpression(
-			'/>=\s*8\.1/',
+			'/>=\s*8\.2/',
 			(string) (self::$composer['require']['php'] ?? ''),
-			'the package requires PHP 8.1 or newer'
+			'the package requires PHP 8.2 or newer'
 		);
 		foreach (['phpunit/phpunit', 'phpstan/phpstan', 'friendsofphp/php-cs-fixer'] as $tool) {
 			$this->assertArrayHasKey($tool, self::$composer['require-dev'] ?? [], "the package develops against {$tool}");
@@ -309,6 +311,27 @@ class PackageStandardTest extends PHPUnit\Framework\TestCase
 					"the message key {$match[1]} on line " . ($number + 1) . ' is declared only once'
 				);
 				$seen[$match[1]] = true;
+			}
+		}
+	}
+
+	public function testErrorMessagesAreIcuPatternsThatRenderEveryArgument()
+	{
+		// PRADO 4.4 formats a message file entry as an ICU MessageFormat pattern. ICU quotes
+		// literal text with apostrophes, so '{0}' renders the literal "{0}"; it is written ''{0}''.
+		foreach ($this->errorMessages() as $code => $message) {
+			preg_match_all('/\{\s*(\d+)\s*[,}]/', $message, $matches);
+			$numbers = array_map('intval', array_unique($matches[1]));
+			$args = $numbers === [] ? [] : array_map(fn ($i) => "\u{AB}{$i}\u{BB}", range(0, max($numbers)));
+			$formatted = MessageFormatter::formatMessage('en', $message, $args);
+			$this->assertNotFalse($formatted, "the message {$code} is an ICU MessageFormat pattern");
+			$this->assertDoesNotMatchRegularExpression(
+				'/\{\d/',
+				$formatted,
+				"the message {$code} quotes a placeholder; double the apostrophes: ''{0}''"
+			);
+			foreach ($numbers as $i) {
+				$this->assertStringContainsString("\u{AB}{$i}\u{BB}", $formatted, "the message {$code} renders argument {$i}");
 			}
 		}
 	}

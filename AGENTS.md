@@ -69,6 +69,8 @@ Two more that the checks cannot see:
   coercing through `TPropertyValue`.
 - Throw PRADO exceptions (`TConfigurationException`, `TInvalidDataValueException`,
   `TInvalidOperationException`) with a message code, never a literal string.
+- Messages in `config/errorMessages.txt` are ICU MessageFormat patterns: quote an argument as
+  `''{0}''`, because `'{0}'` renders the literal `{0}`. `plural`, `select`, and `number` work.
 - Page templates are `.page`, control templates `.tpl`.
 - A package declares its own messages and class map in `config/`. `TPluginModule` also looks for
   an `errorMessages.txt` beside the module class; this package does not use that path, because
