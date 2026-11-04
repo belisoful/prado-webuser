@@ -28,7 +28,8 @@ composer require belisoful/prado-webuser
 Loading the extension by its package name (`<module id="belisoful/prado-webuser" />`) also works;
 the class then comes from `extra.prado.bootstrap`. The `users` and `user_tokens` tables are
 created on first use on MySQL, PostgreSQL, and SQLite unless `AutoCreateTables` says otherwise; on
-another database, create them by hand.
+another database, create them by hand. UPGRADE.md covers moving tables and code from an earlier
+version.
 
 
 What an account may do

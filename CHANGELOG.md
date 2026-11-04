@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+UPGRADE.md describes how to migrate tables created by an earlier build, and the behavior an
+application notices.
+
 ### Security
 
 - A signed-in user is checked against its row on every request (`RevalidateSessions`, on by

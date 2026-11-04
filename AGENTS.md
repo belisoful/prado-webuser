@@ -15,10 +15,10 @@
 | `composer unittest` | The unit suite |
 | `composer coverage` | Unit suite with a text and Clover report |
 | `composer integration` | The Composer install test (needs a PRADO checkout, default `../prado.master`) |
+| `composer fulltest` | The full check, in order |
 
 The unit suite runs on SQLite in memory. Set `WEBUSER_TEST_DSN`, `WEBUSER_TEST_USERNAME`, and
 `WEBUSER_TEST_PASSWORD` to run it on MySQL or PostgreSQL; CI does both.
-| `composer fulltest` | The full check, in order |
 
 Run one test or file with
 `vendor/bin/phpunit --testsuite unit --filter <test, class, or directory>`. Never add or change
